@@ -18,6 +18,12 @@ variable for each profile
 | ------------------------------ | :----- | :---------------------------------------------------------------------- | -------- |
 | `profile::consul::server_ip`   | String | IP address of the consul server                                         |          |
 
+## profile::cvmfs
+
+| Variable                                         | Type          | Description                       | Default                         |
+| ------------------------------------------------ | :------------ | :-------------------------------- | ------------------------------- |
+| `profile::cvmfs::client::lmod_default_modules`   | Array[String] | List of lmod default modules      | `['nixpkgs/16.09', 'imkl/2018.3.222', 'gcc/7.3.0', 'openmpi/3.1.2']` |
+
 
 ## profile::fail2ban
 

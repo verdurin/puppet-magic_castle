@@ -47,41 +47,13 @@ class profile::freeipa::base (
     path    => '/etc/dhcp/dhclient.conf',
     mode    => '0644',
     require => Service['NetworkManager'],
+    notify  => Service['network'],
     content => @("END")
 # Set the dhclient retry interval to 10 seconds instead of 5 minutes.
 retry 10;
 prepend domain-search "int.${domain_name}";
 prepend domain-name-servers ${dns_ip};
 END
-  }
-
-  file_line { 'resolv_search':
-    ensure  => present,
-    path    => '/etc/resolv.conf',
-    match   => 'search',
-    line    => "search int.${domain_name}",
-    require => File['dhclient.conf']
-  }
-
-  file_line { 'resolv_nameserver':
-    ensure  => present,
-    path    => '/etc/resolv.conf',
-    after   => "search int.${domain_name}",
-    line    => "nameserver ${dns_ip}",
-    require => File_line['resolv_search']
-  }
-
-  $interface = split($::interfaces, ',')[0]
-  file_line { 'peerdns':
-    ensure => present,
-    path   => "/etc/sysconfig/network-scripts/ifcfg-${interface}",
-    line   => 'PEERDNS=no'
-  }
-
-  file_line { 'ifcfg_dns1':
-    ensure => present,
-    path   => "/etc/sysconfig/network-scripts/ifcfg-${interface}",
-    line   => "DNS1=${dns_ip}"
   }
 
   file { '/etc/rsyslog.d/ignore-systemd-session-slice.conf':
@@ -108,18 +80,37 @@ class profile::freeipa::client(String $server_ip)
     ensure => 'installed'
   }
 
-  tcp_conn_validator { 'ipa_dns':
-    host      => $server_ip,
-    port      => 53,
-    try_sleep => 10,
-    timeout   => 1200,
+  $ipa_records = [
+    "_kerberos-master._tcp.${int_domain_name} SRV",
+    "_kerberos-master._udp.${int_domain_name} SRV",
+    "_kerberos._tcp.${int_domain_name} SRV",
+    "_kerberos._udp.${int_domain_name} SRV",
+    "_kpasswd._tcp.${int_domain_name} SRV",
+    "_kpasswd._udp.${int_domain_name} SRV",
+    "_ldap._tcp.${int_domain_name} SRV",
+    "ipa-ca.${int_domain_name} A"
+  ]
+
+  wait_for { 'ipa_records':
+    query             => sprintf('dig +short %s | wc -l', join($ipa_records, ' ')),
+    regex             => String(length($ipa_records)),
+    polling_frequency => 10,
+    max_retries       => 60,
+    refreshonly       => true,
+    subscribe         => [Package['ipa-client'], Exec['ipa-client-uninstall']]
   }
 
-  tcp_conn_validator { 'ipa_ldap':
-    host      => $server_ip,
-    port      => 389,
-    try_sleep => 10,
-    timeout   => 1200,
+  # Check if the FreeIPA HTTPD service is consistently available
+  # over a period of 2sec * 15 times = 30 seconds. If a single
+  # test of availability fails, we wait for 5 seconds, then try
+  # again.
+  wait_for { 'ipa-ca_https':
+    query             => "for i in {1..15}; do curl --insecure -L --silent --output /dev/null https://ipa-ca.${int_domain_name}/ && sleep 2 || exit 1; done",
+    exit_code         => 0,
+    polling_frequency => 5,
+    max_retries       => 60,
+    refreshonly       => true,
+    subscribe         => Wait_for['ipa_records']
   }
 
   exec { 'set_hostname':
@@ -130,7 +121,6 @@ class profile::freeipa::client(String $server_ip)
   $ipa_client_install_cmd = @("IPACLIENTINSTALL"/L)
       /sbin/ipa-client-install \
       --domain ${int_domain_name} \
-      --mkhomedir \
       --ssh-trust-dns \
       --enable-dns-updates \
       --unattended \
@@ -141,13 +131,11 @@ class profile::freeipa::client(String $server_ip)
 
   exec { 'ipa-client-install':
     command   => Sensitive($ipa_client_install_cmd),
-    tries     => 10,
-    try_sleep => 10,
-    require   => [File_line['resolv_nameserver'],
-                  File_line['resolv_search'],
+    tries     => 2,
+    try_sleep => 60,
+    require   => [File['dhclient.conf'],
                   Exec['set_hostname'],
-                  Tcp_conn_validator['ipa_dns'],
-                  Tcp_conn_validator['ipa_ldap']],
+                  Wait_for['ipa-ca_https']],
     creates   => '/etc/ipa/default.conf',
     notify    => Service['systemd-logind']
   }
@@ -299,7 +287,6 @@ class profile::freeipa::server
       --hostname ${fqdn} \
       --ds-password ${admin_passwd} \
       --admin-password ${admin_passwd} \
-      --mkhomedir \
       --idstart=50000 \
       --ssh-trust-dns \
       --unattended \
@@ -322,7 +309,7 @@ class profile::freeipa::server
     creates => '/etc/ipa/default.conf',
     timeout => 0,
     require => [Package['ipa-server-dns']],
-    before  => File_line['resolv_search'],
+    before  => File['dhclient.conf'],
     notify  => Service['systemd-logind']
   }
 
